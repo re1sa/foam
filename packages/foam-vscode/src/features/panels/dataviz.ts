@@ -9,6 +9,23 @@ export default async function activate(
   foamPromise: Promise<Foam>
 ) {
   let panel: vscode.WebviewPanel | undefined = undefined;
+
+  // Register serializer for panel restoration
+  if (vscode.window.registerWebviewPanelSerializer) {
+    vscode.window.registerWebviewPanelSerializer('foam-graph', {
+      async deserializeWebviewPanel(webviewPanel: vscode.WebviewPanel) {
+        panel = webviewPanel;
+        const foam = await foamPromise;
+        panel.webview.html = await getWebviewContent(context, panel);
+        setupPanelEventListeners(panel, foam, context);
+        // Clear panel variable when disposed
+        panel.onDidDispose(() => {
+          panel = undefined;
+        });
+      },
+    });
+  }
+
   vscode.workspace.onDidChangeConfiguration(event => {
     if (event.affectsConfiguration('foam.graph.style')) {
       const style = getGraphStyle();
@@ -28,27 +45,76 @@ export default async function activate(
     } else {
       const foam = await foamPromise;
       panel = await createGraphPanel(foam, context);
-      const onFoamChanged = _ => {
-        updateGraph(panel, foam);
-      };
-
-      const noteUpdatedListener = foam.graph.onDidUpdate(onFoamChanged);
+      setupPanelEventListeners(panel, foam, context);
+      // Clear panel variable when disposed
       panel.onDidDispose(() => {
-        noteUpdatedListener.dispose();
         panel = undefined;
       });
+    }
+  });
+}
 
-      vscode.window.onDidChangeActiveTextEditor(e => {
-        if (e?.document?.uri?.scheme !== 'untitled') {
-          const note = foam.workspace.get(fromVsCodeUri(e.document.uri));
-          if (isSome(note)) {
-            panel.webview.postMessage({
-              type: 'didSelectNote',
-              payload: note.uri.path,
-            });
-          }
+// Common function to set up panel event listeners
+function setupPanelEventListeners(
+  webviewPanel: vscode.WebviewPanel,
+  foam: Foam,
+  context: vscode.ExtensionContext
+) {
+  const onFoamChanged = _ => {
+    updateGraph(webviewPanel, foam);
+  };
+
+  const noteUpdatedListener = foam.graph.onDidUpdate(onFoamChanged);
+
+  webviewPanel.onDidDispose(() => {
+    noteUpdatedListener.dispose();
+    // Note: Cannot access external panel variable here,
+    // disposal handling needs to be done by the caller
+  });
+
+  webviewPanel.webview.onDidReceiveMessage(
+    async message => {
+      switch (message.type) {
+        case 'webviewDidLoad': {
+          const styles = getGraphStyle();
+          webviewPanel.webview.postMessage({
+            type: 'didUpdateStyle',
+            payload: styles,
+          });
+          updateGraph(webviewPanel, foam);
+          break;
         }
-      });
+        case 'webviewDidSelectNode': {
+          const noteUri = vscode.Uri.parse(message.payload);
+          const selectedNote = foam.workspace.get(fromVsCodeUri(noteUri));
+          if (isSome(selectedNote)) {
+            vscode.commands.executeCommand(
+              'vscode.open',
+              noteUri,
+              vscode.ViewColumn.One
+            );
+          }
+          break;
+        }
+        case 'error': {
+          Logger.error('An error occurred in the graph view', message.payload);
+          break;
+        }
+      }
+    },
+    undefined,
+    context.subscriptions
+  );
+
+  vscode.window.onDidChangeActiveTextEditor(e => {
+    if (e?.document?.uri?.scheme !== 'untitled') {
+      const note = foam.workspace.get(fromVsCodeUri(e.document.uri));
+      if (isSome(note)) {
+        webviewPanel.webview.postMessage({
+          type: 'didSelectNote',
+          payload: note.uri.path,
+        });
+      }
     }
   });
 }
@@ -123,42 +189,6 @@ async function createGraphPanel(foam: Foam, context: vscode.ExtensionContext) {
   );
 
   panel.webview.html = await getWebviewContent(context, panel);
-
-  panel.webview.onDidReceiveMessage(
-    async message => {
-      switch (message.type) {
-        case 'webviewDidLoad': {
-          const styles = getGraphStyle();
-          panel.webview.postMessage({
-            type: 'didUpdateStyle',
-            payload: styles,
-          });
-          updateGraph(panel, foam);
-          break;
-        }
-        case 'webviewDidSelectNode': {
-          const noteUri = vscode.Uri.parse(message.payload);
-          const selectedNote = foam.workspace.get(fromVsCodeUri(noteUri));
-
-          if (isSome(selectedNote)) {
-            vscode.commands.executeCommand(
-              'vscode.open',
-              noteUri,
-              vscode.ViewColumn.One
-            );
-          }
-          break;
-        }
-        case 'error': {
-          Logger.error('An error occurred in the graph view', message.payload);
-          break;
-        }
-      }
-    },
-    undefined,
-    context.subscriptions
-  );
-
   return panel;
 }
 
