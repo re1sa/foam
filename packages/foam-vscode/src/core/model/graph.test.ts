@@ -675,3 +675,206 @@ describe('Updating graph on workspace state', () => {
     graph.dispose();
   });
 });
+
+describe('Graph Event Handling and Restoration', () => {
+  it('should properly handle graph updates and emit events', () => {
+    const noteA = createTestNote({
+      uri: '/path/to/page-a.md',
+      links: [{ slug: 'page-b' }],
+    });
+    const noteB = createTestNote({
+      uri: '/path/to/another/page-b.md',
+    });
+    const ws = createTestWorkspace();
+    ws.set(noteA).set(noteB);
+    const graph = FoamGraph.fromWorkspace(ws, true);
+
+    let updateEventFired = false;
+    const disposable = graph.onDidUpdate(() => {
+      updateEventFired = true;
+    });
+
+    // Modify the workspace to trigger an update
+    const noteABis = createTestNote({
+      uri: '/path/to/page-a.md',
+      links: [{ slug: 'page-c' }],
+    });
+    ws.set(noteABis);
+
+    expect(updateEventFired).toBeTruthy();
+
+    disposable.dispose();
+    ws.dispose();
+    graph.dispose();
+  });
+
+  it('should maintain graph consistency after multiple rapid updates', () => {
+    const ws = createTestWorkspace();
+    const graph = FoamGraph.fromWorkspace(ws, true);
+
+    const noteA = createTestNote({
+      uri: '/page-a.md',
+      links: [{ slug: 'page-b' }],
+    });
+    ws.set(noteA);
+
+    const noteB = createTestNote({
+      uri: '/page-b.md',
+      links: [{ slug: 'page-c' }],
+    });
+    ws.set(noteB);
+
+    const noteC = createTestNote({
+      uri: '/page-c.md',
+      links: [{ slug: 'page-a' }],
+    });
+    ws.set(noteC);
+
+    // Verify circular connections are properly handled
+    expect(graph.getLinks(noteA.uri).map(l => l.target)).toContain(noteB.uri);
+    expect(graph.getLinks(noteB.uri).map(l => l.target)).toContain(noteC.uri);
+    expect(graph.getLinks(noteC.uri).map(l => l.target)).toContain(noteA.uri);
+
+    // Verify backlinks are correctly maintained
+    expect(graph.getBacklinks(noteA.uri).map(l => l.source)).toContain(noteC.uri);
+    expect(graph.getBacklinks(noteB.uri).map(l => l.source)).toContain(noteA.uri);
+    expect(graph.getBacklinks(noteC.uri).map(l => l.source)).toContain(noteB.uri);
+
+    ws.dispose();
+    graph.dispose();
+  });
+
+  it('should handle graph state serialization and restoration', () => {
+    const noteA = createTestNote({
+      uri: '/page-a.md',
+      links: [{ slug: 'page-b' }],
+    });
+    const noteB = createTestNote({
+      uri: '/page-b.md',
+      title: 'Page B Title',
+      tags: ['tag1', 'tag2'],
+    });
+    const ws = createTestWorkspace();
+    ws.set(noteA).set(noteB);
+    const graph = FoamGraph.fromWorkspace(ws, true);
+
+    // Capture initial state
+    const initialConnections = graph.getAllConnections();
+    const initialNodes = graph.getAllNodes();
+
+    // Create a new graph from the same workspace
+    const restoredGraph = FoamGraph.fromWorkspace(ws, false);
+
+    // Verify restored graph has same structure
+    expect(restoredGraph.getAllConnections()).toHaveLength(initialConnections.length);
+    expect(restoredGraph.getAllNodes()).toHaveLength(initialNodes.length);
+
+    // Verify specific connections are preserved
+    expect(restoredGraph.getLinks(noteA.uri).map(l => l.target)).toEqual([noteB.uri]);
+    expect(restoredGraph.getBacklinks(noteB.uri).map(l => l.source)).toEqual([noteA.uri]);
+
+    ws.dispose();
+    graph.dispose();
+    restoredGraph.dispose();
+  });
+
+  it('should properly dispose event listeners and prevent memory leaks', () => {
+    const ws = createTestWorkspace();
+    const graph = FoamGraph.fromWorkspace(ws, true);
+
+    let updateCount = 0;
+    const disposable = graph.onDidUpdate(() => {
+      updateCount++;
+    });
+
+    // Add a note to trigger update
+    const noteA = createTestNote({
+      uri: '/page-a.md',
+      links: [{ slug: 'page-b' }],
+    });
+    ws.set(noteA);
+    expect(updateCount).toBe(1);
+
+    // Dispose the listener
+    disposable.dispose();
+
+    // Add another note - should not trigger the disposed listener
+    const noteB = createTestNote({
+      uri: '/page-b.md',
+    });
+    ws.set(noteB);
+    expect(updateCount).toBe(1); // Should still be 1
+
+    ws.dispose();
+    graph.dispose();
+  });
+
+  it('should handle concurrent workspace modifications correctly', () => {
+    const ws = createTestWorkspace();
+    const graph = FoamGraph.fromWorkspace(ws, true);
+
+    const noteA = createTestNote({
+      uri: '/page-a.md',
+      links: [{ slug: 'page-b' }, { slug: 'page-c' }],
+    });
+    const noteB = createTestNote({
+      uri: '/page-b.md',
+      links: [{ slug: 'page-d' }],
+    });
+    const noteC = createTestNote({
+      uri: '/page-c.md',
+      links: [{ slug: 'page-d' }],
+    });
+    const noteD = createTestNote({
+      uri: '/page-d.md',
+    });
+
+    // Add notes in sequence
+    ws.set(noteA);
+    ws.set(noteB);
+    ws.set(noteC);
+    ws.set(noteD);
+
+    // Verify all connections are properly established
+    expect(graph.getLinks(noteA.uri)).toHaveLength(2);
+    expect(graph.getBacklinks(noteD.uri)).toHaveLength(2);
+
+    // Remove a note and verify connections are updated
+    ws.delete(noteB.uri);
+    expect(graph.getBacklinks(noteD.uri)).toHaveLength(1);
+    expect(graph.getBacklinks(noteD.uri).map(l => l.source)).toEqual([noteC.uri]);
+
+    ws.dispose();
+    graph.dispose();
+  });
+
+  it('should maintain graph integrity when handling placeholder transitions', () => {
+    const ws = createTestWorkspace();
+    const graph = FoamGraph.fromWorkspace(ws, true);
+
+    // Create note with link to non-existent target
+    const noteA = createTestNote({
+      uri: '/page-a.md',
+      links: [{ slug: 'missing-page' }],
+    });
+    ws.set(noteA);
+
+    // Verify placeholder is created
+    expect(graph.contains(URI.placeholder('missing-page'))).toBeTruthy();
+    expect(graph.getLinks(noteA.uri)[0].target).toEqual(URI.placeholder('missing-page'));
+
+    // Add the missing page
+    const missingPage = createTestNote({
+      uri: '/missing-page.md',
+    });
+    ws.set(missingPage);
+
+    // Verify placeholder is replaced with actual connection
+    expect(graph.contains(URI.placeholder('missing-page'))).toBeFalsy();
+    expect(graph.getLinks(noteA.uri)[0].target).toEqual(missingPage.uri);
+    expect(graph.getBacklinks(missingPage.uri)[0].source).toEqual(noteA.uri);
+
+    ws.dispose();
+    graph.dispose();
+  });
+});
